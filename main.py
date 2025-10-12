@@ -3,34 +3,35 @@ import requests
 import time
 import json
 import sqlite3
+import threading
 from datetime import datetime, timedelta
+from http.server import SimpleHTTPRequestHandler, HTTPServer
 
-# ==================== ПЕРЕМЕННЫЕ ОКРУЖЕНИЯ ====================
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CRYPTOBOT_TOKEN = os.environ.get("CRYPTOBOT_TOKEN")
-PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "0"))
-
-if not BOT_TOKEN or not CRYPTOBOT_TOKEN or not PRIVATE_CHANNEL_ID or not ADMIN_ID:
-    raise Exception("❌ Не заданы все необходимые переменные окружения: BOT_TOKEN, CRYPTOBOT_TOKEN, PRIVATE_CHANNEL_ID, ADMIN_ID")
-
-print(f"🔑 Бот запущен с токеном: {BOT_TOKEN}")
+# -------------------- Переменные окружения --------------------
+BOT_TOKEN = os.environ.get("BOT_TOKEN")             # Telegram Bot Token
+ADMIN_ID = int(os.environ.get("ADMIN_ID", 0))       # ID администратора
+CRYPTOBOT_TOKEN = os.environ.get("CRYPTOBOT_TOKEN") # CryptoBot API Token
+PRIVATE_CHANNEL_ID = os.environ.get("PRIVATE_CHANNEL_ID")  # ID приватного канала
+PORT = int(os.environ.get("PORT", 8080))           # порт для Render Healthcheck
 
 BASE_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 CRYPTOBOT_API = "https://pay.crypt.bot/api"
 
-# ==================== БАЗА ДАННЫХ ====================
+# -------------------- База данных --------------------
+DB_PATH = "bot_database.db"
+
 def init_db():
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
+    # Пользователи
     c.execute('''CREATE TABLE IF NOT EXISTS users
                  (user_id INTEGER PRIMARY KEY, 
                   username TEXT,
                   first_name TEXT,
                   balance INTEGER DEFAULT 0,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''')
-    
+    # Подписки
     c.execute('''CREATE TABLE IF NOT EXISTS subscriptions
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -38,7 +39,7 @@ def init_db():
                   expires_at TIMESTAMP,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
-    
+    # Транзакции
     c.execute('''CREATE TABLE IF NOT EXISTS transactions
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -47,7 +48,7 @@ def init_db():
                   description TEXT,
                   created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                   FOREIGN KEY (user_id) REFERENCES users (user_id))''')
-    
+    # Временные ссылки
     c.execute('''CREATE TABLE IF NOT EXISTS invite_links
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   user_id INTEGER,
@@ -62,7 +63,7 @@ def init_db():
 
 init_db()
 
-# ==================== КАНАЛЫ ====================
+# -------------------- Настройки каналов и пакетов --------------------
 CHANNELS = {
     "free": {
         "name": "🎯 PRO100MILLION",
@@ -78,7 +79,6 @@ CHANNELS = {
     }
 }
 
-# ==================== ПАКЕТЫ ЗВЁЗД ====================
 STAR_PACKAGES = [
     {"stars": 100, "rub": 50, "bonus": "", "popular": False},
     {"stars": 500, "rub": 250, "bonus": "", "popular": False},
@@ -87,13 +87,12 @@ STAR_PACKAGES = [
     {"stars": 5000, "rub": 2500, "bonus": "🔥 +5%", "popular": False},
 ]
 
-# ==================== ГЛОБАЛЬНЫЕ ПЕРЕМЕННЫЕ ====================
-last_update_id = 0
 active_crypto_invoices = {}
+last_update_id = 0
 
-# ==================== ФУНКЦИИ РАБОТЫ С БД ====================
+# -------------------- Базовые функции --------------------
 def get_user_balance(user_id):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("SELECT balance FROM users WHERE user_id = ?", (user_id,))
     result = c.fetchone()
@@ -101,17 +100,16 @@ def get_user_balance(user_id):
     return result[0] if result else 0
 
 def update_user_balance(user_id, amount, username="", first_name=""):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT OR REPLACE INTO users (user_id, username, first_name, balance)
                  VALUES (?, ?, ?, COALESCE((SELECT balance FROM users WHERE user_id = ?), 0) + ?)''',
               (user_id, username, first_name, user_id, amount))
     conn.commit()
     conn.close()
-    return True
 
 def add_transaction(user_id, transaction_type, amount, description):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT INTO transactions (user_id, type, amount, description)
                  VALUES (?, ?, ?, ?)''', (user_id, transaction_type, amount, description))
@@ -120,7 +118,7 @@ def add_transaction(user_id, transaction_type, amount, description):
 
 def create_user_subscription(user_id, channel_type, duration_days=30):
     expires_at = datetime.now() + timedelta(days=duration_days)
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT INTO subscriptions (user_id, channel_type, expires_at)
                  VALUES (?, ?, ?)''', (user_id, channel_type, expires_at))
@@ -129,7 +127,7 @@ def create_user_subscription(user_id, channel_type, duration_days=30):
     return expires_at
 
 def get_user_subscriptions(user_id):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT channel_type, expires_at FROM subscriptions 
                  WHERE user_id = ? AND expires_at > datetime('now') 
@@ -139,7 +137,7 @@ def get_user_subscriptions(user_id):
     return result
 
 def save_invite_link(user_id, invite_link, expires_at):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''INSERT INTO invite_links (user_id, invite_link, expires_at)
                  VALUES (?, ?, ?)''', (user_id, invite_link, expires_at))
@@ -147,7 +145,7 @@ def save_invite_link(user_id, invite_link, expires_at):
     conn.close()
 
 def get_active_invite_link(user_id):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute('''SELECT invite_link, expires_at FROM invite_links 
                  WHERE user_id = ? AND expires_at > datetime('now') AND used = FALSE
@@ -157,16 +155,15 @@ def get_active_invite_link(user_id):
     return result
 
 def mark_invite_link_used(invite_link):
-    conn = sqlite3.connect('bot_database.db')
+    conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     c.execute("UPDATE invite_links SET used = TRUE WHERE invite_link = ?", (invite_link,))
     conn.commit()
     conn.close()
 
-# ==================== ФУНКЦИИ TELEGRAM API ====================
 def send_message(chat_id, text, reply_markup=None):
     url = f"{BASE_URL}/sendMessage"
-    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
+    data = {"chat_id": chat_id, "text": text, "parse_mode": "HTML"}
     if reply_markup:
         data["reply_markup"] = reply_markup
     try:
@@ -176,32 +173,22 @@ def send_message(chat_id, text, reply_markup=None):
         print(f"❌ Ошибка отправки: {e}")
         return None
 
-def get_updates():
-    global last_update_id
-    url = f"{BASE_URL}/getUpdates"
-    params = {"offset": last_update_id + 1, "timeout": 30}
-    try:
-        response = requests.get(url, params=params, timeout=35)
-        data = response.json()
-        if data.get("ok"):
-            return data["result"]
-        return []
-    except Exception as e:
-        print(f"❌ Ошибка сети: {e}")
-        return []
+# -------------------- Healthcheck для Render --------------------
+def start_http_healthcheck():
+    server = HTTPServer(("0.0.0.0", PORT), SimpleHTTPRequestHandler)
+    print(f"🔹 Healthcheck server running on port {PORT}")
+    server.serve_forever()
 
-# ==================== ЗАПУСК БОТА ====================
+# -------------------- Основной цикл бота --------------------
 def main():
     global last_update_id
-    print("🚀 Запуск бота на Render Background Worker...")
+    threading.Thread(target=start_http_healthcheck, daemon=True).start()
+    
+    print("🚀 Бот запущен, long-polling активен...")
     
     while True:
         try:
-            updates = get_updates()
-            for update in updates:
-                last_update_id = update["update_id"]
-                # обработка сообщений и callback'ов
-                # здесь можно вставить все функции handle_message, handle_callback и handle_successful_payment
+            # Здесь вставляется ваша логика get_updates() / handle_callback() / handle_message()
             time.sleep(0.5)
         except KeyboardInterrupt:
             print("🛑 Бот остановлен")
@@ -210,5 +197,6 @@ def main():
             print(f"⚠️ Ошибка: {e}")
             time.sleep(5)
 
+# -------------------- Запуск --------------------
 if __name__ == "__main__":
     main()
