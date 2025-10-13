@@ -76,12 +76,12 @@ init_db()
 # -------------------- Configs --------------------
 CHANNELS = {
     "free": {
-        "name": "🎯 PRO100MILLION",
+        "name": "🎯 ₽ROstava",
         "link": "https://t.me/prostavamillion",
         "description": "Бесплатные прогнозы и аналитика",
     },
     "premium": {
-        "name": "💎 PRO100MILLION PREMIUM",
+        "name": "💎 ₽ROstava PREMIUM",
         "description": "Эксклюзивные ставки и гарантированные прогнозы",
         "price_rub": 2000,
         "price_stars": 2000,
