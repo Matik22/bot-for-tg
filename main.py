@@ -189,6 +189,64 @@ def save_invite_link(user_id, invite_link, expires_at):
     conn.close()
 
 
+def get_user_subscriptions(user_id):
+    """Получить активные подписки пользователя"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    # Получаем активные подписки (те, которые еще не истекли)
+    c.execute("""
+        SELECT channel_type, expires_at 
+        FROM subscriptions 
+        WHERE user_id = ? AND expires_at > datetime('now')
+        ORDER BY expires_at DESC
+    """, (user_id,))
+    
+    subscriptions = []
+    for row in c.fetchall():
+        channel_type = row[0]
+        expires_at = row[1]
+        
+        # Форматируем дату для красивого отображения
+        try:
+            if isinstance(expires_at, str):
+                expires_date = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+            else:
+                expires_date = expires_at
+            formatted_date = expires_date.strftime('%d.%m.%Y')
+        except Exception as e:
+            print(f"Date formatting error: {e}")
+            formatted_date = str(expires_at)
+            
+        # Получаем название канала
+        if channel_type == "premium":
+            channel_name = CHANNELS["premium"]["name"]
+        elif channel_type == "free":
+            channel_name = CHANNELS["free"]["name"]
+        else:
+            channel_name = f"Канал ({channel_type})"
+            
+        subscriptions.append((channel_name, formatted_date))
+    
+    conn.close()
+    return subscriptions
+
+
+def has_active_subscription(user_id, channel_type="premium"):
+    """Проверить, есть ли у пользователя активная подписка на канал"""
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    
+    c.execute("""
+        SELECT COUNT(*) FROM subscriptions 
+        WHERE user_id = ? AND channel_type = ? AND expires_at > datetime('now')
+    """, (user_id, channel_type))
+    
+    result = c.fetchone()[0] > 0
+    conn.close()
+    return result
+
+
 # -------------------- Keyboards --------------------
 def create_main_keyboard():
     return {
@@ -378,6 +436,34 @@ def handle_update(update):
     elif "pre_checkout_query" in update:
         pq = update["pre_checkout_query"]
         answer_pre_checkout_query(pq["id"])
+    elif "successful_payment" in update:
+        handle_successful_payment(update)
+
+
+def handle_successful_payment(update):
+    """Обработка успешной оплаты через Telegram Stars"""
+    message = update.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    user_id = message.get("from", {}).get("id")
+    payment_info = update.get("successful_payment", {})
+    
+    if not payment_info:
+        return
+        
+    payload = payment_info.get("payload", "")
+    total_amount = payment_info.get("total_amount", 0)
+    
+    # Пополняем баланс пользователя
+    update_user_balance(user_id, total_amount)
+    add_transaction(user_id, "deposit", total_amount, "Пополнение через Telegram Stars")
+    
+    # Отправляем подтверждение
+    send_message(
+        chat_id,
+        f"✅ Баланс пополнен на {total_amount} звёзд!\n\n"
+        f"💰 Теперь ваш баланс: {get_user_balance(user_id)} ⭐",
+        create_main_keyboard()
+    )
 
 
 def handle_message(message):
@@ -400,9 +486,9 @@ def handle_message(message):
     elif text == "/mysub":
         subs = get_user_subscriptions(user_id)
         if subs:
-            reply = "📋 Ваши подписки:\n"
+            reply = "📋 <b>Ваши подписки:</b>\n\n"
             for ch, expires in subs:
-                reply += f"• {ch} — до {expires}\n"
+                reply += f"• {ch}\n   └─ до <b>{expires}</b>\n"
             send_message(chat_id, reply)
         else:
             send_message(chat_id, "❌ У вас нет активных подписок.")
@@ -443,7 +529,7 @@ def handle_callback(callback):
     elif data == "channel_premium":
         ch = CHANNELS["premium"]
         bal = get_user_balance(user_id)
-        text = f"<b>{ch['name']}</b>\nСтоимость: {ch['price_stars']} ⭐\nНа балансе: {bal} ⭐"
+        text = f"<b>{ch['name']}</b>\n\n{ch['description']}\n\n💎 Стоимость: {ch['price_stars']} ⭐\n💰 На балансе: {bal} ⭐"
         send_message(chat_id, text, create_premium_keyboard(user_id))
     elif data == "buy_stars":
         send_message(chat_id, "Выберите пакет:", create_stars_keyboard())
@@ -453,7 +539,7 @@ def handle_callback(callback):
         inv = send_stars_invoice(chat_id, stars, f"Покупка {stars} звёзд")
         if inv and inv.get("ok"):
             send_message(
-                chat_id, "Инвойс отправлен. Следуйте инструкциям Telegram оплаты."
+                chat_id, "📋 Инвойс отправлен. Следуйте инструкциям Telegram оплаты."
             )
         else:
             send_message(
@@ -468,26 +554,33 @@ def handle_callback(callback):
             add_transaction(
                 user_id, "subscription", -ch["price_stars"], "Оплата подписки со счета"
             )
+            # Создаем подписку
+            expires_at = create_user_subscription(user_id, "premium", ch["duration_days"])
+            formatted_date = expires_at.strftime('%d.%m.%Y')
+            
+            # Генерируем инвайт-ссылку
             invite = generate_invite_link(
                 PRIVATE_CHANNEL_ID, user_id, ch["duration_days"]
             )
-            send_message(
-                chat_id,
-                (
-                    f"✅ Подписка активирована. Ваша ссылка: {invite}"
-                    if invite
-                    else "✅ Подписка активирована."
-                ),
+            
+            message_text = (
+                f"✅ <b>Подписка активирована!</b>\n\n"
+                f"💎 Канал: {ch['name']}\n"
+                f"📅 Действует до: {formatted_date}\n"
             )
+            
+            if invite:
+                message_text += f"\n🔗 Ваша ссылка: {invite}"
+                
+            send_message(chat_id, message_text)
         else:
             send_message(chat_id, "❌ Недостаточно звёзд на балансе.")
     elif data == "buy_stars_for_sub":
         send_message(chat_id, "Выберите пакет для пополнения:", create_stars_keyboard())
     elif data == "pay_crypto_premium":
         send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
-    elif data.startswith("crypto_") or data.startswith("crypto"):
-        # accept both forms
-        currency = data.split("_", 1)[1] if "_" in data else data.split("crypto", 1)[1]
+    elif data.startswith("crypto_"):
+        currency = data.split("_", 1)[1]
         currency = currency.upper()
         ch = CHANNELS["premium"]
         invoice = create_crypto_invoice(
@@ -504,7 +597,10 @@ def handle_callback(callback):
             }
             send_message(
                 chat_id,
-                f"Оплата: {invoice.get('amount')} {currency}\nСсылка: {invoice.get('pay_url')}",
+                f"💎 <b>Оплата подписки</b>\n\n"
+                f"Сумма: {invoice.get('amount')} {currency}\n"
+                f"Ссылка для оплаты: {invoice.get('pay_url')}\n\n"
+                f"После оплаты подписка активируется автоматически в течение 1-2 минут.",
             )
         else:
             send_message(chat_id, "❌ Ошибка создания крипто-инвойса.")
@@ -515,12 +611,15 @@ def handle_callback(callback):
         subs = get_user_subscriptions(user_id)
         if not subs:
             send_message(
-                chat_id, "У вас нет активных подписок.", create_main_keyboard()
+                chat_id, 
+                "❌ У вас нет активных подписок.\n\nВыберите канал для подписки:", 
+                create_main_keyboard()
             )
         else:
-            text = "📋 Ваши подписки:\n"
+            text = "📋 <b>Ваши активные подписки:</b>\n\n"
             for ch, ex in subs:
-                text += f"• {ch} — до {ex}\n"
+                text += f"• {ch}\n   └─ до <b>{ex}</b>\n"
+            text += "\nДля продления выберите канал в главном меню."
             send_message(chat_id, text, create_main_keyboard())
     elif data == "back_main":
         send_message(chat_id, "Главное меню", create_main_keyboard())
