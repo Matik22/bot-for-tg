@@ -13,7 +13,7 @@ from flask import Flask, request, jsonify
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 CRYPTOBOT_TOKEN = os.getenv("CRYPTOBOT_TOKEN")
-PRIVATE_CHANNEL_ID = os.getenv("PRIVATE_CHANNEL_ID")
+PRIVATE_CHANNEL_ID = "-1003176208290"  # Фиксированный ID приватного канала
 SELF_URL = os.getenv("SELF_URL")  # например https://bot-for-tg-xxxx.onrender.com
 PORT = int(os.getenv("PORT", "8080"))
 
@@ -247,6 +247,42 @@ def has_active_subscription(user_id, channel_type="premium"):
     return result
 
 
+# -------------------- Invite link generator --------------------
+def generate_invite_link(user_id, duration_days=30):
+    """Генерация инвайт-ссылки для приватного канала"""
+    try:
+        # Используем фиксированный ID приватного канала
+        chat_id = int(PRIVATE_CHANNEL_ID)
+        
+        # Создаем инвайт-ссылку
+        expire_timestamp = int(time.time()) + duration_days * 24 * 3600
+        data = {
+            "chat_id": chat_id,
+            "name": f"Premium for user_{user_id}",
+            "expire_date": expire_timestamp,
+            "member_limit": 1,
+            "creates_join_request": False,
+        }
+        
+        res = tg_post("createChatInviteLink", data)
+        print(f"🔗 createChatInviteLink response: {res}")
+        
+        if res and res.get("ok"):
+            invite = res["result"]["invite_link"]
+            expires_at = datetime.now() + timedelta(days=duration_days)
+            save_invite_link(user_id, invite, expires_at)
+            print(f"✅ Invite link created: {invite}")
+            return invite
+        else:
+            print(f"❌ createChatInviteLink failed: {res}")
+            # Если не удалось создать ссылку, возвращаем инструкцию
+            return None
+            
+    except Exception as e:
+        print(f"❌ Error generating invite link: {e}")
+        return None
+
+
 # -------------------- Keyboards --------------------
 def create_main_keyboard():
     return {
@@ -391,39 +427,35 @@ def crypto_checker_loop():
                 if inv_info and inv_info.get("status") == "paid":
                     user_id = info["user_id"]
                     chat_id = info["chat_id"]
+                    channel_type = info.get("channel_type", "premium")
+                    duration_days = info.get("duration_days", 30)
+                    
                     # activate subscription
-                    create_user_subscription(
-                        user_id, "premium", CHANNELS["premium"]["duration_days"]
+                    expires_at = create_user_subscription(user_id, channel_type, duration_days)
+                    formatted_date = expires_at.strftime('%d.%m.%Y')
+                    
+                    # Генерируем инвайт-ссылку
+                    invite = generate_invite_link(user_id, duration_days)
+                    
+                    message_text = (
+                        f"🎉 <b>Оплата подтверждена!</b>\n\n"
+                        f"💎 Подписка активирована на {duration_days} дней\n"
+                        f"📅 Действует до: {formatted_date}\n"
                     )
-                    send_message(
-                        chat_id,
-                        f"🎉 Оплата подтверждена. Подписка активирована на {CHANNELS['premium']['duration_days']} дней.",
-                    )
+                    
+                    if invite:
+                        message_text += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n\n⚠️ Ссылка действительна только для одного использования!"
+                    else:
+                        message_text += f"\n❌ <b>Не удалось создать ссылку</b>\nОбратитесь к администратору"
+                    
+                    send_message(chat_id, message_text)
                     to_remove.append(inv_id)
+                    
             for rid in to_remove:
                 active_crypto_invoices.pop(rid, None)
         except Exception as e:
             print("crypto_checker_loop error", e)
         time.sleep(30)
-
-
-# -------------------- Invite link generator --------------------
-def generate_invite_link(chat_id, user_id, duration_days=30):
-    data = {
-        "chat_id": chat_id,
-        "name": f"Premium access for {user_id}",
-        "expire_date": int(time.time()) + duration_days * 24 * 3600,
-        "member_limit": 1,
-        "creates_join_request": False,
-    }
-    res = tg_post("createChatInviteLink", data)
-    if res and res.get("ok"):
-        invite = res["result"]["invite_link"]
-        expires_at = datetime.now() + timedelta(days=duration_days)
-        save_invite_link(user_id, invite, expires_at)
-        return invite
-    print("createChatInviteLink failed:", res)
-    return None
 
 
 # -------------------- Update handler --------------------
@@ -500,9 +532,12 @@ def handle_message(message):
                 target = int(parts[1])
                 days = int(parts[2])
                 create_user_subscription(target, "premium", days)
-                send_message(
-                    chat_id, f"✅ Подписка добавлена для {target} на {days} дней"
-                )
+                # Создаем инвайт-ссылку для админской подписки
+                invite = generate_invite_link(target, days)
+                message_text = f"✅ Подписка добавлена для {target} на {days} дней"
+                if invite:
+                    message_text += f"\n🔗 Ссылка: {invite}"
+                send_message(chat_id, message_text)
             except Exception as e:
                 send_message(chat_id, "❌ Ошибка в /addsub")
     else:
@@ -559,9 +594,7 @@ def handle_callback(callback):
             formatted_date = expires_at.strftime('%d.%m.%Y')
             
             # Генерируем инвайт-ссылку
-            invite = generate_invite_link(
-                PRIVATE_CHANNEL_ID, user_id, ch["duration_days"]
-            )
+            invite = generate_invite_link(user_id, ch["duration_days"])
             
             message_text = (
                 f"✅ <b>Подписка активирована!</b>\n\n"
@@ -570,7 +603,9 @@ def handle_callback(callback):
             )
             
             if invite:
-                message_text += f"\n🔗 Ваша ссылка: {invite}"
+                message_text += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n\n⚠️ Ссылка действительна только для одного использования!"
+            else:
+                message_text += f"\n❌ <b>Не удалось создать ссылку</b>\nОбратитесь к администратору"
                 
             send_message(chat_id, message_text)
         else:
@@ -594,6 +629,8 @@ def handle_callback(callback):
                 "user_id": user_id,
                 "chat_id": chat_id,
                 "created_at": time.time(),
+                "channel_type": "premium",
+                "duration_days": ch["duration_days"]
             }
             send_message(
                 chat_id,
