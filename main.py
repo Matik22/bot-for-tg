@@ -81,11 +81,11 @@ CHANNELS = {
         "description": "Бесплатные прогнозы и аналитика",
     },
     "premium": {
-        "name": "💎 ₽ROstava PREMIUM",
-        "description": "Эксклюзивные ставки и гарантированные прогнозы",
-        "price_rub": 1000,
-        "price_stars": 1000,
-        "duration_days": 30,
+    "name": "💎 ₽ROstava PREMIUM",
+    "description": "Эксклюзивные ставки и гарантированные прогнозы",
+    "price_rub": 1600,
+    "price_stars": 1000,
+    "duration_days": 30,
     },
 }
 
@@ -189,31 +189,34 @@ def get_user_subscriptions(user_id):
     """Получить активные подписки пользователя"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
+
     # Получаем активные подписки (те, которые еще не истекли)
-    c.execute("""
+    c.execute(
+        """
         SELECT channel_type, expires_at 
         FROM subscriptions 
         WHERE user_id = ? AND expires_at > datetime('now')
         ORDER BY expires_at DESC
-    """, (user_id,))
-    
+    """,
+        (user_id,),
+    )
+
     subscriptions = []
     for row in c.fetchall():
         channel_type = row[0]
         expires_at = row[1]
-        
+
         # Форматируем дату для красивого отображения
         try:
             if isinstance(expires_at, str):
-                expires_date = datetime.strptime(expires_at, '%Y-%m-%d %H:%M:%S')
+                expires_date = datetime.strptime(expires_at, "%Y-%m-%d %H:%M:%S")
             else:
                 expires_date = expires_at
-            formatted_date = expires_date.strftime('%d.%m.%Y')
+            formatted_date = expires_date.strftime("%d.%m.%Y")
         except Exception as e:
             print(f"Date formatting error: {e}")
             formatted_date = str(expires_at)
-            
+
         # Получаем название канала
         if channel_type == "premium":
             channel_name = CHANNELS["premium"]["name"]
@@ -221,9 +224,9 @@ def get_user_subscriptions(user_id):
             channel_name = CHANNELS["free"]["name"]
         else:
             channel_name = f"Канал ({channel_type})"
-            
+
         subscriptions.append((channel_name, formatted_date))
-    
+
     conn.close()
     return subscriptions
 
@@ -232,12 +235,15 @@ def has_active_subscription(user_id, channel_type="premium"):
     """Проверить, есть ли у пользователя активная подписку на канал"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
-    
-    c.execute("""
+
+    c.execute(
+        """
         SELECT COUNT(*) FROM subscriptions 
         WHERE user_id = ? AND channel_type = ? AND expires_at > datetime('now')
-    """, (user_id, channel_type))
-    
+    """,
+        (user_id, channel_type),
+    )
+
     result = c.fetchone()[0] > 0
     conn.close()
     return result
@@ -249,7 +255,7 @@ def generate_invite_link(user_id, duration_days=30):
     try:
         # Используем фиксированный ID приватного канала
         chat_id = int(PRIVATE_CHANNEL_ID)
-        
+
         # Создаем инвайт-ссылку
         expire_timestamp = int(time.time()) + duration_days * 24 * 3600
         data = {
@@ -259,10 +265,10 @@ def generate_invite_link(user_id, duration_days=30):
             "member_limit": 1,
             "creates_join_request": False,
         }
-        
+
         res = tg_post("createChatInviteLink", data)
         print(f"🔗 createChatInviteLink response: {res}")
-        
+
         if res and res.get("ok"):
             invite = res["result"]["invite_link"]
             expires_at = datetime.now() + timedelta(days=duration_days)
@@ -273,7 +279,7 @@ def generate_invite_link(user_id, duration_days=30):
             print(f"❌ createChatInviteLink failed: {res}")
             # Если не удалось создать ссылку, возвращаем инструкцию
             return None
-            
+
     except Exception as e:
         print(f"❌ Error generating invite link: {e}")
         return None
@@ -303,7 +309,14 @@ def create_premium_keyboard(user_id):
                 }
             ]
         )
-    kb.append([{"text": f"💳 Купить {channel['price_stars']} звёзд", "callback_data": "buy_stars_for_sub"}])
+    kb.append(
+        [
+            {
+                "text": f"💳 Купить {channel['price_stars']} звёзд",
+                "callback_data": "buy_stars_for_sub",
+            }
+        ]
+    )
     kb.append(
         [
             {
@@ -414,28 +427,30 @@ def crypto_checker_loop():
                     chat_id = info["chat_id"]
                     channel_type = info.get("channel_type", "premium")
                     duration_days = info.get("duration_days", 30)
-                    
+
                     # activate subscription
-                    expires_at = create_user_subscription(user_id, channel_type, duration_days)
-                    formatted_date = expires_at.strftime('%d.%m.%Y')
-                    
+                    expires_at = create_user_subscription(
+                        user_id, channel_type, duration_days
+                    )
+                    formatted_date = expires_at.strftime("%d.%m.%Y")
+
                     # Генерируем инвайт-ссылку
                     invite = generate_invite_link(user_id, duration_days)
-                    
+
                     message_text = (
                         f"🎉 <b>Оплата подтверждена!</b>\n\n"
                         f"💎 Подписка активирована на {duration_days} дней\n"
                         f"📅 Действует до: {formatted_date}\n"
                     )
-                    
+
                     if invite:
                         message_text += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n\n⚠️ Ссылка действительна только для одного использования!"
                     else:
                         message_text += f"\n❌ <b>Не удалось создать ссылку</b>\nОбратитесь к администратору"
-                    
+
                     send_message(chat_id, message_text)
                     to_remove.append(inv_id)
-                    
+
             for rid in to_remove:
                 active_crypto_invoices.pop(rid, None)
         except Exception as e:
@@ -463,23 +478,23 @@ def handle_successful_payment(update):
     chat_id = message.get("chat", {}).get("id")
     user_id = message.get("from", {}).get("id")
     payment_info = update.get("successful_payment", {})
-    
+
     if not payment_info:
         return
-        
+
     payload = payment_info.get("payload", "")
     total_amount = payment_info.get("total_amount", 0)
-    
+
     # Пополняем баланс пользователя
     update_user_balance(user_id, total_amount)
     add_transaction(user_id, "deposit", total_amount, "Пополнение через Telegram Stars")
-    
+
     # Отправляем подтверждение
     send_message(
         chat_id,
         f"✅ Баланс пополнен на {total_amount} звёзд!\n\n"
         f"💰 Теперь ваш баланс: {get_user_balance(user_id)} ⭐",
-        create_main_keyboard()
+        create_main_keyboard(),
     )
 
 
@@ -573,26 +588,31 @@ def handle_callback(callback):
                 user_id, "subscription", -ch["price_stars"], "Оплата подписки со счета"
             )
             # Создаем подписку
-            expires_at = create_user_subscription(user_id, "premium", ch["duration_days"])
-            formatted_date = expires_at.strftime('%d.%m.%Y')
-            
+            expires_at = create_user_subscription(
+                user_id, "premium", ch["duration_days"]
+            )
+            formatted_date = expires_at.strftime("%d.%m.%Y")
+
             # Генерируем инвайт-ссылку
             invite = generate_invite_link(user_id, ch["duration_days"])
-            
+
             message_text = (
                 f"✅ <b>Подписка активирована!</b>\n\n"
                 f"💎 Канал: {ch['name']}\n"
                 f"📅 Действует до: {formatted_date}\n"
             )
-            
+
             if invite:
                 message_text += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n\n⚠️ Ссылка действительна только для одного использования!"
             else:
                 message_text += f"\n❌ <b>Не удалось создать ссылку</b>\nОбратитесь к администратору"
-                
+
             send_message(chat_id, message_text)
         else:
-            send_message(chat_id, f"❌ Недостаточно звёзд на балансе. Нужно {ch['price_stars']} ⭐, у вас {bal} ⭐")
+            send_message(
+                chat_id,
+                f"❌ Недостаточно звёзд на балансе. Нужно {ch['price_stars']} ⭐, у вас {bal} ⭐",
+            )
     elif data == "pay_crypto_premium":
         send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
     elif data.startswith("crypto_"):
@@ -611,7 +631,7 @@ def handle_callback(callback):
                 "chat_id": chat_id,
                 "created_at": time.time(),
                 "channel_type": "premium",
-                "duration_days": ch["duration_days"]
+                "duration_days": ch["duration_days"],
             }
             send_message(
                 chat_id,
@@ -626,9 +646,9 @@ def handle_callback(callback):
         subs = get_user_subscriptions(user_id)
         if not subs:
             send_message(
-                chat_id, 
-                "❌ У вас нет активных подписок.\n\nВыберите канал для подписки:", 
-                create_main_keyboard()
+                chat_id,
+                "❌ У вас нет активных подписок.\n\nВыберите канал для подписки:",
+                create_main_keyboard(),
             )
         else:
             text = "📋 <b>Ваши активные подписки:</b>\n\n"
