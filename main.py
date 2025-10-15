@@ -83,18 +83,14 @@ CHANNELS = {
     "premium": {
         "name": "💎 ₽ROstava PREMIUM",
         "description": "Эксклюзивные ставки и гарантированные прогнозы",
-        "price_rub": 2000,
-        "price_stars": 2000,
+        "price_rub": 1000,
+        "price_stars": 1000,
         "duration_days": 30,
     },
 }
 
 STAR_PACKAGES = [
-    {"stars": 100, "rub": 50, "popular": False},
-    {"stars": 500, "rub": 250, "popular": False},
     {"stars": 1000, "rub": 500, "popular": True},
-    {"stars": 2000, "rub": 1000, "popular": True},
-    {"stars": 5000, "rub": 2500, "popular": False},
 ]
 
 # in-memory store of active crypto invoices: invoice_id -> {user_id, chat_id, created_at}
@@ -233,7 +229,7 @@ def get_user_subscriptions(user_id):
 
 
 def has_active_subscription(user_id, channel_type="premium"):
-    """Проверить, есть ли у пользователя активная подписка на канал"""
+    """Проверить, есть ли у пользователя активная подписку на канал"""
     conn = sqlite3.connect(DB_PATH)
     c = conn.cursor()
     
@@ -289,20 +285,9 @@ def create_main_keyboard():
         "inline_keyboard": [
             [{"text": "🎯 Бесплатный канал", "callback_data": "channel_free"}],
             [{"text": "💎 Премиум канал", "callback_data": "channel_premium"}],
-            [{"text": "⭐ Купить звёзды", "callback_data": "buy_stars"}],
-            [{"text": "💰 Мой баланс", "callback_data": "my_balance"}],
             [{"text": "📊 Мои подписки", "callback_data": "my_subs"}],
         ]
     }
-
-
-def create_stars_keyboard():
-    kb = []
-    for p in STAR_PACKAGES:
-        text = f"⭐ {p['stars']} — {p['rub']}₽"
-        kb.append([{"text": text, "callback_data": f"stars_{p['stars']}"}])
-    kb.append([{"text": "🔙 Назад", "callback_data": "back_main"}])
-    return {"inline_keyboard": kb}
 
 
 def create_premium_keyboard(user_id):
@@ -318,7 +303,7 @@ def create_premium_keyboard(user_id):
                 }
             ]
         )
-    kb.append([{"text": f"💳 Купить звёзды", "callback_data": "buy_stars_for_sub"}])
+    kb.append([{"text": f"💳 Купить {channel['price_stars']} звёзд", "callback_data": "buy_stars_for_sub"}])
     kb.append(
         [
             {
@@ -566,12 +551,10 @@ def handle_callback(callback):
         bal = get_user_balance(user_id)
         text = f"<b>{ch['name']}</b>\n\n{ch['description']}\n\n💎 Стоимость: {ch['price_stars']} ⭐\n💰 На балансе: {bal} ⭐"
         send_message(chat_id, text, create_premium_keyboard(user_id))
-    elif data == "buy_stars":
-        send_message(chat_id, "Выберите пакет:", create_stars_keyboard())
-    elif data.startswith("stars_"):
-        stars = int(data.split("_", 1)[1])
-        # send invoice for stars
-        inv = send_stars_invoice(chat_id, stars, f"Покупка {stars} звёзд")
+    elif data == "buy_stars_for_sub":
+        # Покупка 1000 звезд для подписки
+        stars = 1000
+        inv = send_stars_invoice(chat_id, stars, f"Покупка {stars} звёзд для подписки")
         if inv and inv.get("ok"):
             send_message(
                 chat_id, "📋 Инвойс отправлен. Следуйте инструкциям Telegram оплаты."
@@ -609,9 +592,7 @@ def handle_callback(callback):
                 
             send_message(chat_id, message_text)
         else:
-            send_message(chat_id, "❌ Недостаточно звёзд на балансе.")
-    elif data == "buy_stars_for_sub":
-        send_message(chat_id, "Выберите пакет для пополнения:", create_stars_keyboard())
+            send_message(chat_id, f"❌ Недостаточно звёзд на балансе. Нужно {ch['price_stars']} ⭐, у вас {bal} ⭐")
     elif data == "pay_crypto_premium":
         send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
     elif data.startswith("crypto_"):
@@ -641,9 +622,6 @@ def handle_callback(callback):
             )
         else:
             send_message(chat_id, "❌ Ошибка создания крипто-инвойса.")
-    elif data == "my_balance":
-        bal = get_user_balance(user_id)
-        send_message(chat_id, f"💰 Ваш баланс: {bal} ⭐", create_main_keyboard())
     elif data == "my_subs":
         subs = get_user_subscriptions(user_id)
         if not subs:
