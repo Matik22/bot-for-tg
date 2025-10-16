@@ -275,27 +275,30 @@ def create_crypto_keyboard():
 
 # -------------------- CryptoBot --------------------
 def get_crypto_rates():
-    """Получаем актуальные курсы от CryptoBot"""
-    url = f"{CRYPTOBOT_API}/getExchangeRates"
-    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
+    """Получаем актуальные курсы от CoinGecko как запасной вариант"""
     try:
-        r = requests.get(url, headers=headers, timeout=10)
-        res = r.json()
-        if res.get("ok"):
-            rates = {}
-            for rate in res["result"]:
-                if rate["is_valid"]:
-                    rates[rate["source"]] = float(rate["rate"])
-            return rates
-    except Exception as e:
-        print(f"Error getting crypto rates: {e}")
+        # Пробуем получить курсы от CoinGecko
+        r = requests.get(
+            "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,toncoin,tether&vs_currencies=usd",
+            timeout=10
+        )
+        if r.status_code == 200:
+            data = r.json()
+            return {
+                "BTC": data["bitcoin"]["usd"],
+                "ETH": data["ethereum"]["usd"], 
+                "TON": data["toncoin"]["usd"],
+                "USDT": 1.0
+            }
+    except:
+        pass
     
-    # Fallback rates если API не доступно
+    # Fallback курсы если API недоступно (примерные)
     return {
-        "USDT": 1.0,
-        "TON": 5.2,    # примерный курс TON/USD
-        "BTC": 0.000016, # примерный курс BTC/USD
-        "ETH": 0.00027   # примерный курс ETH/USD
+        "BTC": 60000,    # ~$60,000
+        "ETH": 3000,     # ~$3,000
+        "TON": 5,        # ~$5
+        "USDT": 1.0
     }
 
 
@@ -306,11 +309,11 @@ def calculate_subscription_in_crypto(price_usd, currency):
     if currency not in rates:
         return None
         
-    # Если курс для USDT, просто возвращаем сумму в USDT
+    # Для USDT просто возвращаем сумму
     if currency == "USDT":
         return round(price_usd, 2)
     
-    # Для других валют рассчитываем сумму
+    # Рассчитываем сумму в криптовалюте
     crypto_amount = price_usd / rates[currency]
     
     # Округляем в зависимости от валюты
@@ -325,35 +328,47 @@ def calculate_subscription_in_crypto(price_usd, currency):
 
 
 def create_crypto_invoice(price_usd, currency="USDT", description="Подписка"):
-    amount = calculate_subscription_in_crypto(price_usd, currency)
-    if amount is None:
-        return None
-        
+    # Сначала пробуем создать инвойс напрямую через CryptoBot
     url = f"{CRYPTOBOT_API}/createInvoice"
     headers = {
         "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
         "Content-Type": "application/json",
     }
+    
+    # Для USDT используем фиксированную сумму
+    if currency == "USDT":
+        amount = str(round(price_usd, 2))
+    else:
+        # Для других валют используем расчет через курсы
+        amount_calc = calculate_subscription_in_crypto(price_usd, currency)
+        if amount_calc is None:
+            return None
+        amount = str(amount_calc)
+    
     payload = {
         "asset": currency,
-        "amount": str(amount),
+        "amount": amount,
         "description": description,
         "payload": str(int(time.time())),
         "allow_comments": False,
         "allow_anonymous": False,
         "expires_in": 3600,
     }
+    
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         res = r.json()
-        print(f"CryptoBot invoice response: {res}")  # Для отладки
+        print(f"CryptoBot {currency} invoice response: {res}")  # Для отладки
+        
         if res.get("ok"):
             return res["result"]
         else:
-            print(f"CryptoBot error: {res}")
+            print(f"CryptoBot error for {currency}: {res}")
+            return None
+            
     except Exception as e:
-        print(f"CryptoBot create_invoice error: {e}")
-    return None
+        print(f"CryptoBot create_invoice error for {currency}: {e}")
+        return None
 
 
 def check_crypto_invoice(invoice_id):
@@ -507,6 +522,8 @@ def handle_callback(callback):
         send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
     elif data.startswith("crypto_"):
         cur = data.split("_")[1].upper()
+        
+        # Рассчитываем сумму для отображения
         amount = calculate_subscription_in_crypto(ch["price_usd"], cur)
         if amount is None:
             send_message(chat_id, f"❌ Не удалось рассчитать сумму для {cur}")
@@ -532,7 +549,7 @@ def handle_callback(callback):
                 f"После оплаты подписка активируется автоматически в течение 1-2 минут.",
             )
         else:
-            send_message(chat_id, f"❌ Ошибка создания инвойса для {cur}.")
+            send_message(chat_id, f"❌ Ошибка создания инвойса для {cur}. Попробуйте другую валюту.")
     elif data == "my_subs":
         subs = get_user_subscriptions(user_id)
         if not subs:
