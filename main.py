@@ -22,11 +22,10 @@ CRYPTOBOT_API = "https://pay.crypt.bot/api"
 
 DB_PATH = "bot_database.db"
 
-# Актуальные цены (обновляются в реальном времени)
 crypto_prices = {
-    "BTC": 67500,    # Актуальная цена BTC ~$67,500 (ноябрь 2024)
-    "ETH": 3500,     # ~$3,500 за ETH
-    "TON": 2.0,      # ~$2.0 за TON
+    "BTC": 60000,  # можно обновлять динамически
+    "ETH": 3200,
+    "TON": 1.2,    # исправленная цена
     "USDT": 1.0
 }
 active_crypto_invoices = {}
@@ -67,7 +66,7 @@ CHANNELS = {
         "description": "Эксклюзивные ставки и гарантированные прогнозы",
         "price_stars": 1000,
         "price_rub": 1649,
-        "price_usd": 25,  # $25
+        "price_usd": 25,
         "duration_days": 30,
     },
 }
@@ -278,44 +277,18 @@ def update_crypto_prices_loop():
                 crypto_prices["TON"] = data["toncoin"]["usd"]
                 crypto_prices["USDT"] = 1.0
                 print(f"💰 Updated prices: BTC=${crypto_prices['BTC']}, ETH=${crypto_prices['ETH']}, TON=${crypto_prices['TON']}")
-            else:
-                # Fallback цены (актуальные на ноябрь 2024)
-                crypto_prices.update({
-                    "BTC": 67500,    # Актуальная цена BTC ~$67,500
-                    "ETH": 3500,     # ETH ~$3,500
-                    "TON": 2.0,      # TON ~$2.0
-                    "USDT": 1.0
-                })
-                print("⚠️ Using fallback prices")
         except Exception as e:
             print("Error updating prices:", e)
-            # Актуальные fallback цены
-            crypto_prices.update({
-                "BTC": 67500,    # $67,500 за BTC (актуально на ноябрь 2024)
-                "ETH": 3500,     # $3,500 за ETH
-                "TON": 2.0,      # $2.0 за TON
-                "USDT": 1.0
-            })
-        time.sleep(300)  # Обновляем каждые 5 минут
+        time.sleep(300)
 
 def get_crypto_amounts(price_usd):
-    """Возвращает правильные суммы для всех криптовалют с проверкой"""
     global crypto_prices
-    
-    # Проверяем, что цены актуальные
-    if crypto_prices["BTC"] < 1000:  # Если цена подозрительно низкая
-        print("⚠️ Suspicious BTC price, using fallback")
-        crypto_prices["BTC"] = 67500
-    
-    amounts = {
+    return {
         "BTC": round(price_usd / crypto_prices["BTC"], 6),
         "ETH": round(price_usd / crypto_prices["ETH"], 4),
         "TON": round(price_usd / crypto_prices["TON"], 2),
         "USDT": round(price_usd, 2)
     }
-    
-    print(f"💱 Calculated amounts for ${price_usd}: {amounts}")
-    return amounts
 
 def create_crypto_invoice(price_usd, currency="USDT", description="Подписка"):
     amounts = get_crypto_amounts(price_usd)
@@ -324,8 +297,6 @@ def create_crypto_invoice(price_usd, currency="USDT", description="Подпис�
     if amount is None:
         print(f"❌ Cannot calculate amount for {currency}")
         return None
-
-    print(f"💱 Creating {currency} invoice: {amount} {currency} for ${price_usd}")
 
     url = f"{CRYPTOBOT_API}/createInvoice"
     headers = {
@@ -346,13 +317,11 @@ def create_crypto_invoice(price_usd, currency="USDT", description="Подпис�
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         result = response.json()
-        print(f"📄 CryptoBot {currency} response: {result}")
         
         if result.get("ok"):
             return result["result"]
         else:
-            error_msg = result.get("error", "Unknown error")
-            print(f"❌ CryptoBot error for {currency}: {error_msg}")
+            print(f"❌ CryptoBot error for {currency}: {result.get('error','Unknown')}")
             return None
     except Exception as e:
         print(f"❌ CryptoBot API error for {currency}: {e}")
@@ -524,7 +493,13 @@ def handle_callback(callback):
             ch["price_usd"], cur, f"Подписка {ch['name']} на {ch['duration_days']} дней"
         )
         if invoice:
+            # исправление KeyError
             inv_id = invoice.get("invoice_id") or invoice.get("id")
+            if not inv_id:
+                send_message(chat_id, f"❌ Ошибка создания инвойса для {cur}")
+                answer_callback_query(cb_id)
+                return
+
             active_crypto_invoices[inv_id] = {
                 "user_id": user_id,
                 "chat_id": chat_id,
