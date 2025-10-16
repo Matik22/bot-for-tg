@@ -26,7 +26,7 @@ DB_PATH = "bot_database.db"
 crypto_prices = {
     "BTC": 60000,    # ~$60,000 за BTC
     "ETH": 3200,     # ~$3,200 за ETH
-    "TON": 1.6,      # исправленная цена TON
+    "TON": 2.0,      # ~$2.0 за TON (ИСПРАВЛЕНО)
     "USDT": 1.0
 }
 active_crypto_invoices = {}
@@ -67,7 +67,7 @@ CHANNELS = {
         "description": "Эксклюзивные ставки и гарантированные прогнозы",
         "price_stars": 1000,
         "price_rub": 1649,
-        "price_usd": 25,
+        "price_usd": 25,  # $25
         "duration_days": 30,
     },
 }
@@ -268,21 +268,29 @@ def update_crypto_prices_loop():
     while True:
         try:
             response = requests.get(
-                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,ton,tether&vs_currencies=usd",
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,toncoin,tether&vs_currencies=usd",
                 timeout=10,
             )
             if response.status_code == 200:
                 data = response.json()
                 crypto_prices["BTC"] = data["bitcoin"]["usd"]
                 crypto_prices["ETH"] = data["ethereum"]["usd"]
-                crypto_prices["TON"] = data["ton"]["usd"]  # исправлено
+                crypto_prices["TON"] = data["toncoin"]["usd"]  # Будет обновляться автоматически
                 crypto_prices["USDT"] = 1.0
                 print(f"💰 Updated prices: BTC=${crypto_prices['BTC']}, ETH=${crypto_prices['ETH']}, TON=${crypto_prices['TON']}")
         except Exception as e:
             print("Error updating prices:", e)
-        time.sleep(300)
+            # Fallback цены
+            crypto_prices.update({
+                "BTC": 60000,
+                "ETH": 3200, 
+                "TON": 2.0,  # $2.0 за TON
+                "USDT": 1.0
+            })
+        time.sleep(300)  # Обновляем каждые 5 минут
 
 def get_crypto_amounts(price_usd):
+    """Возвращает правильные суммы для всех криптовалют"""
     global crypto_prices
     return {
         "BTC": round(price_usd / crypto_prices["BTC"], 6),
@@ -369,6 +377,7 @@ def crypto_checker_loop():
         for rid in to_remove:
             active_crypto_invoices.pop(rid, None)
         time.sleep(30)
+
 # -------------------- Handlers --------------------
 def handle_update(update):
     if "message" in update:
@@ -573,4 +582,3 @@ if __name__ == "__main__":
     threading.Thread(target=update_crypto_prices_loop, daemon=True).start()
     print(f"Starting Flask on 0.0.0.0:{PORT}")
     app.run(host="0.0.0.0", port=PORT)
-
