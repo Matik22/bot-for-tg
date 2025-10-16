@@ -213,7 +213,7 @@ def answer_pre_checkout_query(pre_checkout_query_id):
 def create_crypto_invoice(amount_usd, currency="USDT", description="Подписка"):
     url = f"{CRYPTOBOT_API}/createInvoice"
     headers = {"Crypto-Pay-API-Token":CRYPTOBOT_TOKEN,"Content-Type":"application/json"}
-    rates = {"USDT":1.0,"TON":1.8,"BTC":58000.0,"ETH":3000.0}
+    rates = {"USDT":1.0,"TON":1.8,"BTC":58000.0,"ETH":3000.0}  # Примерные курсы
     if currency not in rates: return None
     amt = round(amount_usd / rates[currency], 6 if currency in ["BTC"] else 4)
     payload = {"asset":currency,"amount":str(amt),"description":description,"payload":str(int(time.time())),
@@ -234,8 +234,7 @@ def check_crypto_invoice(invoice_id):
         res = r.json()
         if res.get("ok") and res["result"]["items"]:
             return res["result"]["items"][0]
-    except Exception as e:
-        print("CryptoBot check exception:", e)
+    except Exception as e: print("CryptoBot check exception:", e)
     return None
 
 # -------------------- Crypto checker --------------------
@@ -292,6 +291,59 @@ def handle_message(message):
             except: send_message(chat_id,"❌ Ошибка в /addsub")
     else:
         send_message(chat_id,"🤖 Не распознана команда. Нажмите /start.",create_main_keyboard())
+
+def handle_callback(callback):
+    callback_id = callback.get("id")
+    data = callback.get("data")
+    from_user = callback.get("from", {})
+    user_id = from_user.get("id")
+    message = callback.get("message", {})
+    chat_id = message.get("chat", {}).get("id")
+    ch = CHANNELS["premium"]
+
+    if data == "channel_free":
+        ch_free = CHANNELS["free"]
+        send_message(chat_id, f"<b>{ch_free['name']}</b>\n\n{ch_free['description']}\n\n{ch_free['link']}")
+    elif data == "channel_premium":
+        bal = get_user_balance(user_id)
+        send_message(chat_id, f"<b>{ch['name']}</b>\n\n{ch['description']}\n\n💎 Стоимость: {ch['price_stars']} ⭐ (≈{ch['price_rub']}₽)\n💰 На балансе: {bal} ⭐",
+                     create_premium_keyboard(user_id))
+    elif data == "pay_from_balance":
+        bal = get_user_balance(user_id)
+        if bal >= ch["price_stars"]:
+            update_user_balance(user_id, -ch["price_stars"])
+            add_transaction(user_id, "subscription", -ch["price_stars"], "Оплата подписки со счета")
+            expires_at = create_user_subscription(user_id, "premium", ch["duration_days"])
+            invite = generate_invite_link(user_id, ch["duration_days"])
+            msg = f"✅ <b>Подписка активирована!</b>\n💎 Канал: {ch['name']}\n📅 Действует до: {expires_at.strftime('%d.%m.%Y')}"
+            if invite: msg += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n⚠️ Ссылка одноразовая"
+            send_message(chat_id, msg)
+        else:
+            send_message(chat_id, f"❌ Недостаточно звёзд. Нужно {ch['price_stars']} ⭐, у вас {bal} ⭐")
+    elif data == "buy_stars_for_sub":
+        inv = send_stars_invoice(chat_id, ch["price_stars"], f"Покупка {ch['price_stars']} ⭐ для подписки")
+        if inv and inv.get("ok"): send_message(chat_id, "📋 Инвойс отправлен. Следуйте инструкциям Telegram оплаты.")
+        else: send_message(chat_id, "❌ Не удалось создать инвойс (проверьте STARS_PROVIDER_TOKEN).")
+    elif data == "pay_crypto_premium":
+        send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
+    elif data.startswith("crypto_"):
+        currency = data.split("_", 1)[1].upper()
+        invoice = create_crypto_invoice(ch["price_usd"], currency, f"Подписка {ch['name']} на {ch['duration_days']} дней")
+        if invoice:
+            inv_id = invoice.get("invoice_id") or invoice.get("id")
+            active_crypto_invoices[inv_id] = {"user_id":user_id,"chat_id":chat_id,"created_at":time.time(),"channel_type":"premium","duration_days":ch["duration_days"]}
+            send_message(chat_id, f"💎 <b>Оплата подписки</b>\nСумма: {invoice.get('amount')} {currency}\nСсылка: {invoice.get('pay_url')}")
+        else: send_message(chat_id, "❌ Ошибка создания инвойса.")
+    elif data == "my_subs":
+        subs = get_user_subscriptions(user_id)
+        if subs:
+            text = "📋 <b>Ваши активные подписки:</b>\n\n"
+            for c, ex in subs: text += f"• {c}\n   └─ до <b>{ex}</b>\n"
+            send_message(chat_id, text, create_main_keyboard())
+        else: send_message(chat_id, "❌ У вас нет активных подписок.", create_main_keyboard())
+    elif data == "back_main":
+        send_message(chat_id, "Главное меню", create_main_keyboard())
+    answer_callback_query(callback_id)
 
 def handle_update(update):
     if "message" in update: handle_message(update["message"])
