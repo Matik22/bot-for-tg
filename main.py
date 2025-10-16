@@ -503,37 +503,38 @@ def handle_callback(callback):
         send_message(chat_id, "Выберите валюту:", create_crypto_keyboard())
 
     elif data.startswith("crypto_"):
-        currency = data.split("_")[1].upper()  # BTC, ETH, TON, USDT
-        amount = calculate_crypto_amount(ch["price_usd"], currency)
-        if amount is None:
-            send_message(chat_id, f"❌ Не удалось рассчитать сумму для {currency}")
-            answer_callback_query(cb_id)
-            return
+    currency = data.split("_")[1].upper()  # BTC, ETH, TON, USDT
+    amount = calculate_crypto_amount(ch["price_usd"], currency)
+    if amount is None:
+        send_message(chat_id, f"❌ Не удалось рассчитать сумму для {currency}")
+        answer_callback_query(cb_id)
+        return
 
-        invoice = create_crypto_invoice(
-            ch["price_usd"], currency,
-            f"Подписка {ch['name']} на {ch['duration_days']} дней"
+    invoice = create_crypto_invoice(
+        ch["price_usd"], currency,
+        f"Подписка {ch['name']} на {ch['duration_days']} дней"
+    )
+
+    if invoice:
+        inv_id = invoice.get("invoice_id") or invoice.get("id")
+        active_crypto_invoices[inv_id] = {
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "created_at": time.time(),
+            "duration_days": ch["duration_days"],
+        }
+
+        send_message(
+            chat_id,
+            f"💎 <b>Оплата подписки</b>\n\n"
+            f"💰 Сумма: {amount} {currency}\n"
+            f"💵 Примерно: {ch['price_usd']} USD\n"
+            f"🔗 Ссылка для оплаты: {invoice.get('pay_url')}\n\n"
+            f"После оплаты подписка активируется автоматически в течение 1-2 минут."
         )
+    else:
+        send_message(chat_id, f"❌ Ошибка создания инвойса для {currency}. Попробуйте другую валюту.")
 
-        if invoice:
-            inv_id = invoice.get("invoice_id") or invoice.get("id")
-            active_crypto_invoices[inv_id] = {
-                "user_id": user_id,
-                "chat_id": chat_id,
-                "created_at": time.time(),
-                "duration_days": ch["duration_days"],
-            }
-
-            send_message(
-                chat_id,
-                f"💎 <b>Оплата подписки</b>\n\n"
-                f"💰 Сумма: {amount} {currency}\n"
-                f"💵 Примерно: {ch['price_usd']} USD\n"
-                f"🔗 Ссылка для оплаты: {invoice.get('pay_url')}\n\n"
-                f"После оплаты подписка активируется автоматически в течение 1-2 минут."
-            )
-        else:
-            send_message(chat_id, f"❌ Ошибка создания инвойса для {currency}. Попробуйте другую валюту.")
 
     elif data == "my_subs":
         subs = get_user_subscriptions(user_id)
@@ -636,4 +637,5 @@ if __name__ == "__main__":
     threading.Thread(target=update_crypto_prices_loop, daemon=True).start()
     print(f"Starting Flask on 0.0.0.0:{PORT}")
     app.run(host="0.0.0.0", port=PORT)
+
 
