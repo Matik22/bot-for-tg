@@ -1,7 +1,6 @@
 import os
 import threading
 import time
-import json
 import sqlite3
 from datetime import datetime, timedelta
 import requests
@@ -217,173 +216,151 @@ def send_stars_invoice(chat_id, stars_amount, description):
     return tg_post("sendInvoice", data)
 
 def answer_pre_checkout_query(pre_checkout_query_id):
-    return tg_post("answerPreCheckoutQuery", {"pre_checkout_query_id": pre_checkout_query_id, "ok": True})
+    return tg_post("answerPreCheckoutQuery", {"pre_checkout_query_id":pre_checkout_query_id,"ok":True})
 
-# -------------------- CryptoBot payments --------------------
-def create_crypto_invoice(amount, currency="USDT", description="Оплата подписки"):
+# -------------------- Crypto payments --------------------
+def get_crypto_price(crypto_id):
+    try:
+        r = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids={crypto_id}&vs_currencies=usd", timeout=5)
+        return r.json()[crypto_id]["usd"]
+    except:
+        return None
+
+def calculate_subscription_in_crypto(price_usd, currency):
+    crypto_ids = {"BTC":"bitcoin","ETH":"ethereum","TON":"toncoin","USDT":"tether"}
+    if currency not in crypto_ids: return None
+    if currency=="USDT": return price_usd
+    rate = get_crypto_price(crypto_ids[currency])
+    if not rate: return None
+    return round(price_usd/rate, 6 if currency=="BTC" else 4 if currency=="ETH" else 2)
+
+def create_crypto_invoice(amount_usd, currency="USDT", description="Оплата подписки"):
     url = f"{CRYPTOBOT_API}/createInvoice"
-    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,"Content-Type":"application/json"}
-    payload = {"asset":currency,"amount":str(amount),"description":description,"payload":str(int(time.time())),
+    headers = {"Crypto-Pay-API-Token":CRYPTOBOT_TOKEN,"Content-Type":"application/json"}
+    amt = calculate_subscription_in_crypto(amount_usd, currency)
+    if amt is None: return None
+    payload = {"asset":currency,"amount":str(amt),"description":description,"payload":str(int(time.time())),
                "allow_comments":False,"allow_anonymous":False,"expires_in":3600}
     try:
         r = requests.post(url, headers=headers, json=payload, timeout=10)
         res = r.json()
         if res.get("ok"): return res["result"]
     except Exception as e:
-        print("CryptoBot error:", e)
+        print("CryptoBot create exception:", e)
     return None
 
 def check_crypto_invoice(invoice_id):
     url = f"{CRYPTOBOT_API}/getInvoices"
-    headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN}
-    params = {"invoice_ids": invoice_id}
+    headers = {"Crypto-Pay-API-Token":CRYPTOBOT_TOKEN}
+    params = {"invoice_ids":invoice_id}
     try:
         r = requests.get(url, headers=headers, params=params, timeout=10)
         res = r.json()
         if res.get("ok") and res["result"]["items"]:
             return res["result"]["items"][0]
     except Exception as e:
-        print("CryptoBot check error:", e)
+        print("CryptoBot check exception:", e)
     return None
 
-# -------------------- TON price --------------------
-def get_ton_to_usd():
-    try:
-        r = requests.get("https://api.coingecko.com/api/v3/simple/price?ids=toncoin&vs_currencies=usd", timeout=5)
-        data = r.json()
-        return data["toncoin"]["usd"]
-    except:
-        return 2.0  # fallback курс
-
-def calculate_subscription_in_ton(price_usd):
-    return round(price_usd / get_ton_to_usd(), 4)
-
-# -------------------- Crypto checker --------------------
+# -------------------- Crypto checker loop --------------------
 def crypto_checker_loop():
     while True:
-        try:
-            now = time.time()
-            to_remove = []
-            for inv_id, info in list(active_crypto_invoices.items()):
-                if now - info["created_at"] > 2*3600:
-                    to_remove.append(inv_id)
-                    continue
-                inv_info = check_crypto_invoice(inv_id)
-                if inv_info and inv_info.get("status")=="paid":
-                    user_id = info["user_id"]
-                    chat_id = info["chat_id"]
-                    days = info.get("duration_days",30)
-                    create_user_subscription(user_id,"premium",days)
-                    invite = generate_invite_link(user_id,days)
-                    msg = f"🎉 <b>Оплата подтверждена!</b>\n💎 Подписка активирована на {days} дней\n📅 Действует до: {(datetime.now()+timedelta(days=days)).strftime('%d.%m.%Y')}"
-                    if invite: msg += f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n⚠️ Ссылка одноразовая"
-                    send_message(chat_id,msg)
-                    to_remove.append(inv_id)
-            for rid in to_remove: active_crypto_invoices.pop(rid,None)
-        except Exception as e:
-            print("Crypto checker loop error:", e)
+        now = time.time()
+        to_remove = []
+        for inv_id, info in list(active_crypto_invoices.items()):
+            if now - info["created_at"] > 2*3600: to_remove.append(inv_id); continue
+            inv_info = check_crypto_invoice(inv_id)
+            if inv_info and inv_info.get("status")=="paid":
+                user_id = info["user_id"]
+                chat_id = info["chat_id"]
+                duration_days = info.get("duration_days",30)
+                expires_at = create_user_subscription(user_id,"premium",duration_days)
+                invite = generate_invite_link(user_id,duration_days)
+                msg = f"🎉 <b>Оплата подтверждена!</b>\n💎 Подписка {duration_days} дней\n📅 До {expires_at.strftime('%d.%m.%Y')}"
+                if invite: msg += f"\n🔗 Ваша ссылка: {invite}"
+                send_message(chat_id,msg)
+                to_remove.append(inv_id)
+        for rid in to_remove: active_crypto_invoices.pop(rid,None)
         time.sleep(30)
 
-# -------------------- Handlers --------------------
-def handle_message(message):
-    chat_id = message["chat"]["id"]
-    user = message.get("from",{})
-    user_id = user.get("id")
-    text = message.get("text","")
-    update_user_balance(user_id,0,user.get("username",""),user.get("first_name",""))
-    if text=="/start":
-        send_message(chat_id,f"👋 Привет, {user.get('first_name','')}!\nВыберите действие:",create_main_keyboard())
-    elif text=="/mysub":
-        subs = get_user_subscriptions(user_id)
-        if subs:
-            reply="📋 <b>Ваши подписки:</b>\n\n"
-            for ch, expires in subs: reply+=f"• {ch}\n   └─ до <b>{expires}</b>\n"
-            send_message(chat_id,reply)
-        else: send_message(chat_id,"❌ У вас нет активных подписок.")
-    elif text and text.startswith("/addsub") and int(user_id)==ADMIN_ID:
-        parts=text.split()
-        if len(parts)==3:
-            try:
-                target=int(parts[1])
-                days=int(parts[2])
-                create_user_subscription(target,"premium",days)
-                invite=generate_invite_link(target,days)
-                msg=f"✅ Подписка добавлена для {target} на {days} дней"
-                if invite: msg+=f"\n🔗 Ссылка: {invite}"
-                send_message(chat_id,msg)
-            except: send_message(chat_id,"❌ Ошибка в /addsub")
-    else:
-        send_message(chat_id,"🤖 Не распознана команда. Нажмите /start.",create_main_keyboard())
-
-def handle_callback(callback):
-    callback_id = callback.get("id")
-    data = callback.get("data")
-    from_user = callback.get("from", {})
-    user_id = from_user.get("id")
-    message = callback.get("message", {})
-    chat_id = message.get("chat", {}).get("id")
-    ch = CHANNELS["premium"]
-
-    if data=="channel_free":
-        ch_free = CHANNELS["free"]
-        send_message(chat_id, f"<b>{ch_free['name']}</b>\n\n{ch_free['description']}\n\n{ch_free['link']}")
-    elif data=="channel_premium":
-        bal = get_user_balance(user_id)
-        send_message(chat_id, f"<b>{ch['name']}</b>\n\n{ch['description']}\n\n💎 Стоимость: {ch['price_stars']} ⭐ (≈{ch['price_rub']}₽)\n💰 На балансе: {bal} ⭐", create_premium_keyboard(user_id))
-    elif data=="pay_from_balance":
-        bal = get_user_balance(user_id)
-        if bal>=ch["price_stars"]:
-            update_user_balance(user_id,-ch["price_stars"])
-            add_transaction(user_id,"subscription",-ch["price_stars"],"Оплата подписки со счета")
-            expires_at = create_user_subscription(user_id,"premium",ch["duration_days"])
-            invite = generate_invite_link(user_id,ch["duration_days"])
-            msg = f"✅ <b>Подписка активирована!</b>\n💎 Канал: {ch['name']}\n📅 Действует до: {expires_at.strftime('%d.%m.%Y')}"
-            if invite: msg+=f"\n🔗 <b>Ваша ссылка:</b>\n{invite}\n⚠️ Ссылка одноразовая"
-            send_message(chat_id,msg)
-        else:
-            send_message(chat_id,f"❌ Недостаточно звёзд. Нужно {ch['price_stars']} ⭐, у вас {bal} ⭐")
-    elif data=="buy_stars_for_sub":
-        inv = send_stars_invoice(chat_id,ch["price_stars"],f"Покупка {ch['price_stars']} ⭐ для подписки")
-        if inv and inv.get("ok"): send_message(chat_id,"📋 Инвойс отправлен. Следуйте инструкциям Telegram оплаты.")
-        else: send_message(chat_id,"❌ Не удалось создать инвойс (проверьте STARS_PROVIDER_TOKEN).")
-    elif data=="pay_crypto_premium":
-        send_message(chat_id,"Выберите валюту:",create_crypto_keyboard())
-    elif data.startswith("crypto_"):
-        currency = data.split("_",1)[1].upper()
-        price = ch["price_usd"]
-        if currency=="TON": price = calculate_subscription_in_ton(ch["price_usd"])
-        invoice = create_crypto_invoice(price,currency,f"Подписка {ch['name']} на {ch['duration_days']} дней")
-        if invoice:
-            inv_id = invoice.get("invoice_id") or invoice.get("id")
-            active_crypto_invoices[inv_id]={"user_id":user_id,"chat_id":chat_id,"created_at":time.time(),"channel_type":"premium","duration_days":ch["duration_days"]}
-            send_message(chat_id,f"💎 <b>Оплата подписки</b>\nСумма: {invoice.get('amount')} {currency}\nСсылка: {invoice.get('pay_url')}")
-        else: send_message(chat_id,"❌ Ошибка создания инвойса.")
-    elif data=="my_subs":
-        subs = get_user_subscriptions(user_id)
-        if subs:
-            text = "📋 <b>Ваши активные подписки:</b>\n\n"
-            for c, ex in subs: text += f"• {c}\n   └─ до <b>{ex}</b>\n"
-            send_message(chat_id,text,create_main_keyboard())
-        else:
-            send_message(chat_id,"❌ У вас нет активных подписок.",create_main_keyboard())
-    elif data=="back_main":
-        send_message(chat_id,"Главное меню",create_main_keyboard())
-    answer_callback_query(callback_id)
-
+# -------------------- Update handler --------------------
 def handle_update(update):
     if "message" in update: handle_message(update["message"])
     elif "callback_query" in update: handle_callback(update["callback_query"])
     elif "pre_checkout_query" in update: answer_pre_checkout_query(update["pre_checkout_query"]["id"])
-    elif "successful_payment" in update:
-        msg = update.get("message",{})
-        chat_id = msg.get("chat",{}).get("id")
-        user_id = msg.get("from",{}).get("id")
-        payment_info = update.get("successful_payment",{})
-        if payment_info:
-            total_amount = payment_info.get("total_amount",0)
-            update_user_balance(user_id,total_amount)
-            add_transaction(user_id,"deposit",total_amount,"Пополнение через Telegram Stars")
-            send_message(chat_id,f"✅ Баланс пополнен на {total_amount} ⭐\n💰 Сейчас: {get_user_balance(user_id)} ⭐",create_main_keyboard())
+    elif "successful_payment" in update: handle_successful_payment(update)
+
+# -------------------- Message / Callback --------------------
+def handle_message(msg):
+    chat_id = msg["chat"]["id"]
+    user = msg.get("from",{})
+    user_id = user.get("id")
+    update_user_balance(user_id,0,user.get("username",""),user.get("first_name",""))
+    text = msg.get("text","")
+    if text=="/start":
+        send_message(chat_id,f"👋 Привет {user.get('first_name','')}!\nВыберите действие:",create_main_keyboard())
+    elif text=="/mysub":
+        subs = get_user_subscriptions(user_id)
+        if not subs: send_message(chat_id,"❌ У вас нет активных подписок."); return
+        msg_text = "📋 <b>Ваши подписки:</b>\n"
+        for ch, ex in subs: msg_text += f"• {ch} └ до <b>{ex}</b>\n"
+        send_message(chat_id,msg_text)
+    else: send_message(chat_id,"🤖 Команда не распознана.",create_main_keyboard())
+
+def handle_callback(callback):
+    data = callback.get("data")
+    from_user = callback.get("from",{})
+    user_id = from_user.get("id")
+    chat_id = callback["message"]["chat"]["id"]
+    ch = CHANNELS["premium"]
+    if data=="channel_free":
+        chf = CHANNELS["free"]
+        send_message(chat_id,f"<b>{chf['name']}</b>\n\n{chf['description']}\n{chf['link']}")
+    elif data=="channel_premium":
+        bal = get_user_balance(user_id)
+        send_message(chat_id,f"<b>{ch['name']}</b>\n💎 Стоимость: {ch['price_stars']} ⭐ (~{ch['price_rub']}₽)\n💰 На балансе: {bal} ⭐",create_premium_keyboard(user_id))
+    elif data=="pay_from_balance":
+        bal = get_user_balance(user_id)
+        if bal>=ch["price_stars"]:
+            update_user_balance(user_id,-ch["price_stars"])
+            add_transaction(user_id,"subscription",-ch["price_stars"],"Оплата подписки")
+            expires_at = create_user_subscription(user_id,"premium",ch["duration_days"])
+            invite = generate_invite_link(user_id,ch["duration_days"])
+            msg_text = f"✅ Подписка активирована до {expires_at.strftime('%d.%m.%Y')}"
+            if invite: msg_text += f"\n🔗 Ссылка: {invite}"
+            send_message(chat_id,msg_text)
+        else: send_message(chat_id,f"❌ Недостаточно звёзд. Нужно {ch['price_stars']}, у вас {bal}")
+    elif data=="buy_stars_for_sub":
+        send_stars_invoice(chat_id,ch["price_stars"],f"Покупка {ch['price_stars']} ⭐")
+    elif data=="pay_crypto_premium":
+        send_message(chat_id,"Выберите валюту:",create_crypto_keyboard())
+    elif data.startswith("crypto_"):
+        currency = data.split("_")[1].upper()
+        invoice = create_crypto_invoice(ch["price_usd"],currency,f"Подписка {ch['name']} на {ch['duration_days']} дней")
+        if invoice:
+            inv_id = invoice.get("invoice_id") or invoice.get("id")
+            active_crypto_invoices[inv_id] = {"user_id":user_id,"chat_id":chat_id,"created_at":time.time(),"duration_days":ch["duration_days"]}
+            send_message(chat_id,f"💎 Оплата подписки\nСумма: {invoice.get('amount')} {currency}\nСсылка: {invoice.get('pay_url')}")
+        else: send_message(chat_id,"❌ Ошибка создания инвойса")
+    elif data=="my_subs":
+        subs = get_user_subscriptions(user_id)
+        if not subs: send_message(chat_id,"❌ Нет активных подписок",create_main_keyboard()); return
+        msg_text = "📋 <b>Ваши активные подписки:</b>\n"
+        for ch, ex in subs: msg_text += f"• {ch} └ до <b>{ex}</b>\n"
+        send_message(chat_id,msg_text,create_main_keyboard())
+    elif data=="back_main": send_message(chat_id,"Главное меню",create_main_keyboard())
+    answer_callback_query(callback.get("id"))
+
+def handle_successful_payment(update):
+    msg = update.get("message",{})
+    chat_id = msg.get("chat",{}).get("id")
+    user_id = msg.get("from",{}).get("id")
+    payment_info = update.get("successful_payment",{})
+    if payment_info:
+        total_amount = payment_info.get("total_amount",0)
+        update_user_balance(user_id,total_amount)
+        add_transaction(user_id,"deposit",total_amount,"Пополнение через Telegram Stars")
+        send_message(chat_id,f"✅ Баланс пополнен на {total_amount} ⭐\n💰 Сейчас: {get_user_balance(user_id)} ⭐",create_main_keyboard())
 
 # -------------------- Webhook --------------------
 @app.route("/", methods=["GET"])
