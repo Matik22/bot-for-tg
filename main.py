@@ -297,9 +297,6 @@ def create_crypto_invoice(price_usd, currency="USDT", description="Подпис�
     if amount is None:
         print(f"❌ [CryptoInvoice] Cannot calculate amount for {currency}")
         return None
-
-    print(f"💱 [CryptoInvoice] Creating {currency} invoice: {amount} {currency} for ${price_usd}")
-
     url = f"{CRYPTOBOT_API}/createInvoice"
     headers = {"Crypto-Pay-API-Token": CRYPTOBOT_TOKEN, "Content-Type": "application/json"}
     payload = {
@@ -311,11 +308,9 @@ def create_crypto_invoice(price_usd, currency="USDT", description="Подпис�
         "allow_anonymous": False,
         "expires_in": 3600,
     }
-
     try:
         response = requests.post(url, headers=headers, json=payload, timeout=10)
         result = response.json()
-        print(f"📄 [CryptoInvoice] {currency} response: {result}")
         if result.get("ok"):
             return result["result"]
         else:
@@ -331,13 +326,8 @@ def check_crypto_invoice(invoice_id):
     try:
         r = requests.get(url, headers=headers, params={"invoice_ids": invoice_id}, timeout=10)
         res = r.json()
-        print(f"🔍 [CryptoCheck] Invoice {invoice_id} response: {res}")
         if res.get("ok") and res["result"]["items"]:
-            item = res["result"]["items"][0]
-            print(f"🔔 [CryptoCheck] Invoice {invoice_id} status: {item.get('status')}")
-            return item
-        else:
-            print(f"⚠️ [CryptoCheck] Invoice {invoice_id} not found or not ok")
+            return res["result"]["items"][0]
     except Exception as e:
         print(f"❌ [CryptoCheck] Error checking invoice {invoice_id}: {e}")
     return None
@@ -348,7 +338,6 @@ def crypto_checker_loop():
         to_remove = []
         for inv_id, info in list(active_crypto_invoices.items()):
             if now - info["created_at"] > 2 * 3600:
-                print(f"⏰ [CryptoChecker] Invoice {inv_id} expired, removing")
                 to_remove.append(inv_id)
                 continue
             inv_info = check_crypto_invoice(inv_id)
@@ -362,10 +351,7 @@ def crypto_checker_loop():
                 if invite:
                     msg += f"\n🔗 Ваша ссылка: {invite}\n⚠️ Ссылка действительна только для одного использования!"
                 send_message(chat_id, msg)
-                print(f"✅ [CryptoChecker] Invoice {inv_id} marked as paid, subscription activated")
                 to_remove.append(inv_id)
-            elif inv_info:
-                print(f"ℹ️ [CryptoChecker] Invoice {inv_id} status: {inv_info.get('status')}")
         for rid in to_remove:
             active_crypto_invoices.pop(rid, None)
         time.sleep(30)
@@ -398,4 +384,43 @@ def handle_successful_payment(update):
         create_main_keyboard(),
     )
 
-# --- остальные функции handle_message, handle_callback и webhook оставлены без изменений ---
+# Остальные функции handle_message, handle_callback и вебхук добавляются сюда (оставляем без изменений)
+# -------------------- Webhook --------------------
+@app.route("/", methods=["GET"])
+def index():
+    return "OK"
+
+@app.route(f"/webhook/{BOT_TOKEN}", methods=["POST"])
+def webhook():
+    try:
+        update = request.get_json(force=True)
+        threading.Thread(target=handle_update, args=(update,), daemon=True).start()
+    except Exception as e:
+        print("webhook exception", e)
+    return jsonify({"ok": True})
+
+def set_webhook():
+    if not SELF_URL:
+        return
+    webhook_url = f"{SELF_URL}/webhook/{BOT_TOKEN}"
+    res = tg_post(
+        "setWebhook",
+        {
+            "url": webhook_url,
+            "allowed_updates": [
+                "message",
+                "callback_query",
+                "pre_checkout_query",
+                "successful_payment",
+            ],
+        },
+    )
+    print("setWebhook response:", res)
+
+# -------------------- Startup --------------------
+if __name__ == "__main__":
+    set_webhook()
+    threading.Thread(target=crypto_checker_loop, daemon=True).start()
+    threading.Thread(target=update_crypto_prices_loop, daemon=True).start()
+    print(f"Starting Flask on 0.0.0.0:{PORT}")
+    app.run(host="0.0.0.0", port=PORT)
