@@ -274,80 +274,75 @@ def create_crypto_keyboard():
 
 
 # -------------------- CryptoBot --------------------
-def get_crypto_rates():
-    """Получаем актуальные курсы от CoinGecko как запасной вариант"""
+def get_actual_crypto_prices():
+    """Получаем актуальные цены криптовалют в USD"""
     try:
-        # Пробуем получить курсы от CoinGecko
-        r = requests.get(
+        # Используем CoinGecko API для получения актуальных цен
+        response = requests.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,ethereum,toncoin,tether&vs_currencies=usd",
             timeout=10
         )
-        if r.status_code == 200:
-            data = r.json()
+        if response.status_code == 200:
+            data = response.json()
             return {
                 "BTC": data["bitcoin"]["usd"],
-                "ETH": data["ethereum"]["usd"], 
+                "ETH": data["ethereum"]["usd"],
                 "TON": data["toncoin"]["usd"],
                 "USDT": 1.0
             }
-    except:
-        pass
+    except Exception as e:
+        print(f"Error getting crypto prices: {e}")
     
-    # Fallback курсы если API недоступно (примерные)
+    # Fallback цены (актуальные на момент написания)
     return {
-        "BTC": 60000,    # ~$60,000
-        "ETH": 3000,     # ~$3,000
-        "TON": 5,        # ~$5
+        "BTC": 65000,   # ~$65,000 за BTC
+        "ETH": 3500,    # ~$3,500 за ETH  
+        "TON": 7.5,     # ~$7.5 за TON
         "USDT": 1.0
     }
 
 
-def calculate_subscription_in_crypto(price_usd, currency):
-    """Рассчитываем сумму в криптовалюте для оплаты"""
-    rates = get_crypto_rates()
+def calculate_crypto_amount(price_usd, currency):
+    """Рассчитываем количество криптовалюты для указанной суммы в USD"""
+    prices = get_actual_crypto_prices()
     
-    if currency not in rates:
+    if currency not in prices:
         return None
         
-    # Для USDT просто возвращаем сумму
-    if currency == "USDT":
-        return round(price_usd, 2)
-    
-    # Рассчитываем сумму в криптовалюте
-    crypto_amount = price_usd / rates[currency]
+    # Рассчитываем количество криптовалюты
+    crypto_amount = price_usd / prices[currency]
     
     # Округляем в зависимости от валюты
     if currency == "BTC":
-        return round(crypto_amount, 6)
+        return round(crypto_amount, 6)  # 6 знаков для BTC
     elif currency == "ETH":
-        return round(crypto_amount, 4)
+        return round(crypto_amount, 4)  # 4 знака для ETH
     elif currency == "TON":
-        return round(crypto_amount, 2)
+        return round(crypto_amount, 2)  # 2 знака для TON
+    elif currency == "USDT":
+        return round(crypto_amount, 2)  # 2 знака для USDT
     else:
-        return round(crypto_amount, 2)
+        return round(crypto_amount, 4)
 
 
 def create_crypto_invoice(price_usd, currency="USDT", description="Подписка"):
-    # Сначала пробуем создать инвойс напрямую через CryptoBot
+    # Рассчитываем сумму в криптовалюте
+    amount = calculate_crypto_amount(price_usd, currency)
+    if amount is None:
+        print(f"❌ Cannot calculate amount for {currency}")
+        return None
+        
+    print(f"💱 Creating invoice: {amount} {currency} for ${price_usd}")
+    
     url = f"{CRYPTOBOT_API}/createInvoice"
     headers = {
         "Crypto-Pay-API-Token": CRYPTOBOT_TOKEN,
         "Content-Type": "application/json",
     }
     
-    # Для USDT используем фиксированную сумму
-    if currency == "USDT":
-        amount = str(round(price_usd, 2))
-    else:
-        # Для других валют используем расчет через курсы
-        amount_calc = calculate_subscription_in_crypto(price_usd, currency)
-        if amount_calc is None:
-            return None
-        amount = str(amount_calc)
-    
     payload = {
         "asset": currency,
-        "amount": amount,
+        "amount": str(amount),
         "description": description,
         "payload": str(int(time.time())),
         "allow_comments": False,
@@ -356,18 +351,19 @@ def create_crypto_invoice(price_usd, currency="USDT", description="Подпис�
     }
     
     try:
-        r = requests.post(url, headers=headers, json=payload, timeout=10)
-        res = r.json()
-        print(f"CryptoBot {currency} invoice response: {res}")  # Для отладки
+        response = requests.post(url, headers=headers, json=payload, timeout=10)
+        result = response.json()
+        print(f"📄 CryptoBot response for {currency}: {result}")
         
-        if res.get("ok"):
-            return res["result"]
+        if result.get("ok"):
+            return result["result"]
         else:
-            print(f"CryptoBot error for {currency}: {res}")
+            error_msg = result.get("error", "Unknown error")
+            print(f"❌ CryptoBot error for {currency}: {error_msg}")
             return None
             
     except Exception as e:
-        print(f"CryptoBot create_invoice error for {currency}: {e}")
+        print(f"❌ CryptoBot API error for {currency}: {e}")
         return None
 
 
@@ -524,7 +520,7 @@ def handle_callback(callback):
         cur = data.split("_")[1].upper()
         
         # Рассчитываем сумму для отображения
-        amount = calculate_subscription_in_crypto(ch["price_usd"], cur)
+        amount = calculate_crypto_amount(ch["price_usd"], cur)
         if amount is None:
             send_message(chat_id, f"❌ Не удалось рассчитать сумму для {cur}")
             answer_callback_query(cb_id)
@@ -541,10 +537,17 @@ def handle_callback(callback):
                 "created_at": time.time(),
                 "duration_days": ch["duration_days"],
             }
+            
+            # Получаем актуальные цены для информационного сообщения
+            prices = get_actual_crypto_prices()
+            crypto_price = prices.get(cur, 0)
+            
             send_message(
                 chat_id,
                 f"💎 <b>Оплата подписки</b>\n\n"
                 f"💰 Сумма: {amount} {cur}\n"
+                f"💵 Примерно: {ch['price_usd']} USD\n"
+                f"📊 Курс: 1 {cur} = {crypto_price} USD\n"
                 f"🔗 Ссылка для оплаты: {invoice.get('pay_url')}\n\n"
                 f"После оплаты подписка активируется автоматически в течение 1-2 минут.",
             )
